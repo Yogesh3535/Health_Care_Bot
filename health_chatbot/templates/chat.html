@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}Chat - HealthBot{% endblock %}
+{% block content %}
+<div class="chat-layout">
+
+  <div class="sidebar">
+    <h3>📄 Your Documents</h3>
+    <form id="upload-form">
+      <input type="file" id="pdf-file" name="pdf_file" accept="application/pdf" required>
+      <button type="submit">Upload PDF</button>
+    </form>
+    <div id="upload-status"></div>
+    <ul id="doc-list">
+      {% for doc in documents %}
+        <li>{{ doc.filename }}</li>
+      {% else %}
+        <li class="muted">No documents uploaded yet.</li>
+      {% endfor %}
+    </ul>
+
+    <h3>📍 Nearby Care</h3>
+    <button id="nearby-btn">Find Nearby Doctors</button>
+    <div id="nearby-results"></div>
+  </div>
+
+  <div class="chat-container">
+    <div class="chat-header">🩺 {{ bot_name }} — Health Assistant</div>
+    <div id="chat-box" class="chat-box">
+      <div class="message bot">Hello {{ username }}! Ask me about symptoms, medicines, or upload a PDF and ask about it.</div>
+    </div>
+    <div class="chat-input">
+      <input type="text" id="user-input" placeholder="Type your health question..." autocomplete="off">
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const chatBox = document.getElementById('chat-box');
+const input = document.getElementById('user-input');
+const sendBtn = document.getElementById('send-btn');
+
+function addMessage(text, sender) {
+  const div = document.createElement('div');
+  div.className = 'message ' + sender;
+  div.style.whiteSpace = 'pre-wrap';
+  div.textContent = text;
+  chatBox.appendChild(div);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+async function sendMessage() {
+  const text = input.value.trim();
+  if (!text) return;
+  addMessage(text, 'user');
+  input.value = '';
+
+  const res = await fetch('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({message: text})
+  });
+  const data = await res.json();
+  addMessage(data.reply, 'bot');
+}
+
+sendBtn.addEventListener('click', sendMessage);
+input.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+// ---- PDF upload ----
+const uploadForm = document.getElementById('upload-form');
+const uploadStatus = document.getElementById('upload-status');
+const docList = document.getElementById('doc-list');
+
+uploadForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fileInput = document.getElementById('pdf-file');
+  if (!fileInput.files.length) return;
+
+  const formData = new FormData();
+  formData.append('pdf_file', fileInput.files[0]);
+
+  uploadStatus.textContent = 'Uploading & indexing...';
+  const res = await fetch('/upload', { method: 'POST', body: formData });
+  const data = await res.json();
+
+  if (res.ok) {
+    uploadStatus.textContent = data.message;
+    const li = document.createElement('li');
+    li.textContent = fileInput.files[0].name;
+    if (docList.querySelector('.muted')) docList.innerHTML = '';
+    docList.appendChild(li);
+    fileInput.value = '';
+  } else {
+    uploadStatus.textContent = 'Error: ' + data.error;
+  }
+});
+
+// ---- Nearby doctors (browser geolocation) ----
+const nearbyBtn = document.getElementById('nearby-btn');
+const nearbyResults = document.getElementById('nearby-results');
+
+// Same public mirrors the backend tries, queried directly from the browser.
+// Your browser almost always has open internet access even when the
+// backend server (dev machine / container / corporate network) doesn't -
+// so doing the actual lookup here, not just the geolocation, sidesteps
+// backend network/firewall issues entirely.
+const OVERPASS_MIRRORS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.openstreetmap.ru/api/interpreter'
+];
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function buildOverpassQuery(lat, lon, radiusM) {
+  return `[out:json][timeout:20];(` +
+    `node["amenity"="doctors"](around:${radiusM},${lat},${lon});` +
+    `node["amenity"="clinic"](around:${radiusM},${lat},${lon});` +
+    `node["amenity"="hospital"](around:${radiusM},${lat},${lon});` +
+    `node["amenity"="pharmacy"](around:${radiusM},${lat},${lon});` +
+    `);out center;`;
+}
+
+async function fetchFromBrowser(lat, lon, radiusM = 3000) {
+  const query = buildOverpassQuery(lat, lon, radiusM);
+  for (const url of OVERPASS_MIRRORS) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'data=' + encodeURIComponent(query),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      if (!res.ok) continue;
+      const data = await res.json();
+      return parseOverpassElements(data, lat, lon);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      continue; // try next mirror
+    }
+  }
+  return null; // every mirror failed from the browser too
+}
+
+function parseOverpassElements(data, lat, lon) {
+  const elements = data.elements || [];
+  return elements
+    .map(el => {
+      const tags = el.tags || {};
+      const eLat = el.lat, eLon = el.lon;
+      if (eLat == null || eLon == null) return null;
+      const addressParts = [tags['addr:housenumber'], tags['addr:street'], tags['addr:city']].filter(Boolean);
+      return {
+        name: tags.name || 'Unnamed facility',
+        type: tags.amenity || 'medical',
+        distance_km: Math.round(haversineKm(lat, lon, eLat, eLon) * 100) / 100,
+        address: addressParts.join(' ') || 'Address not available'
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.distance_km - b.distance_km)
+    .slice(0, 10);
+}
+
+async function fetchFromServer(lat, lon) {
+  const res = await fetch('/nearby-doctors', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({lat, lon})
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Server lookup failed.');
+  return data.results || [];
+}
+
+function renderResults(results, lat, lon) {
+  const mapsLink = `<a href="https://www.google.com/maps/search/doctors+near+me/@${lat},${lon},15z" target="_blank" rel="noopener">Open in Google Maps instead &rarr;</a>`;
+
+  if (!results || results.length === 0) {
+    nearbyResults.innerHTML = `No facilities found nearby.<br>${mapsLink}`;
+    return;
+  }
+  nearbyResults.innerHTML = '';
+  const ul = document.createElement('ul');
+  results.forEach(r => {
+    const li = document.createElement('li');
+    li.innerHTML = `<strong>${r.name}</strong> (${r.type})<br>${r.distance_km} km away<br><span class="muted">${r.address}</span>`;
+    ul.appendChild(li);
+  });
+  nearbyResults.appendChild(ul);
+  const mapsDiv = document.createElement('div');
+  mapsDiv.style.marginTop = '8px';
+  mapsDiv.innerHTML = mapsLink;
+  nearbyResults.appendChild(mapsDiv);
+}
+
+nearbyBtn.addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    nearbyResults.textContent = 'Geolocation not supported by your browser.';
+    return;
+  }
+  nearbyResults.textContent = 'Getting your location...';
+
+  navigator.geolocation.getCurrentPosition(async (position) => {
+    const lat = position.coords.latitude;
+    const lon = position.coords.longitude;
+    nearbyResults.textContent = 'Searching nearby facilities from your browser...';
+
+    // 1) Try directly from the browser first (bypasses backend network issues).
+    let results = await fetchFromBrowser(lat, lon);
+
+    // 2) If the browser couldn't reach any mirror either, fall back to the server route.
+    if (results === null) {
+      nearbyResults.textContent = 'Trying via server...';
+      try {
+        results = await fetchFromServer(lat, lon);
+      } catch (err) {
+        nearbyResults.innerHTML = `Could not reach any facility lookup service (browser or server).<br>` +
+          `<a href="https://www.google.com/maps/search/doctors+near+me/@${lat},${lon},15z" target="_blank" rel="noopener">Open in Google Maps instead &rarr;</a>`;
+        return;
+      }
+    }
+
+    renderResults(results, lat, lon);
+  }, (err) => {
+    nearbyResults.textContent = 'Could not get location: ' + err.message;
+  });
+});
+</script>
+{% endblock %}

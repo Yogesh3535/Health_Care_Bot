@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}History - HealthBot{% endblock %}
+{% block content %}
+<div class="history-container">
+  <h2>Chat History for {{ username }}</h2>
+  <a href="{{ url_for('chat_page') }}">&larr; Back to chat</a>
+  <div class="history-list">
+    {% for msg in messages %}
+      <div class="message {{ msg.sender }}">
+        <span class="ts">[{{ msg.timestamp.strftime('%Y-%m-%d %H:%M') }}]</span>
+        <strong>{{ msg.sender }}:</strong> {{ msg.message }}
+      </div>
+    {% else %}
+      <p class="muted">No messages yet.</p>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

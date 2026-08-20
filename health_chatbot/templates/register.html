@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Register - HealthBot{% endblock %}
+{% block content %}
+<div class="auth-container">
+  <h2>Create Account</h2>
+  <form method="POST" action="{{ url_for('register') }}">
+    <label>Username</label>
+    <input type="text" name="username" required autofocus>
+
+    <label>Email</label>
+    <input type="email" name="email" required>
+
+    <label>Password</label>
+    <input type="password" name="password" required minlength="6">
+
+    <button type="submit">Register</button>
+  </form>
+  <p class="auth-switch">Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
+</div>
+{% endblock %}
